@@ -21,40 +21,40 @@ Slurm users
         --script_path "examples/bert/pt.py"
 """
 
+
+
 import os
 import functools
 from dataclasses import dataclass, field
 
 import transformers
 import accelerate
+from peft import LoraConfig, get_peft_model
 
 import dllm
 
 
 @dataclass
 class ModelArguments(dllm.utils.ModelArguments):
-    model_name_or_path: str = "answerdotai/ModernBERT-large"
+    model_name_or_path: str = "jhu-clsp/mmBERT-base"
+    use_lora: bool = field(default=True, metadata={"help": "Apply LoRA adapters"})
 
 
 @dataclass
 class DataArguments(dllm.utils.DataArguments):
-    dataset_args: str = "Trelis/tiny-shakespeare"
-    text_field: str = "Text"
-    max_length: int = 128
+    dataset_args: str = "Q-bert/wiki-tr-filtered"
+    text_field: str = "text"
+    max_length: int = 8192
     streaming: bool = False
     drop_tail: bool = True
-    insert_eos: bool = field(
-        default=True,
-        metadata={
-            "help": "False when adjacent samples from the datasets are semantically coherent."
-        },
-    )
+    insert_eos: bool = field(default=True)
+
 
 @dataclass
 class TrainingArguments(dllm.utils.TrainingArguments):
-    output_dir: str = "models/ModernBERT-base/tiny-shakespeare"
-    num_train_epochs: int = 20
-    learning_rate: float = 1e-4
+    output_dir: str = "models/mmbert-turkish-wiki"
+    num_train_epochs: int = 2
+    learning_rate: float = 5e-5
     per_device_train_batch_size: int = 64
     per_device_eval_batch_size: int = 64
     eval_steps: float = 0.1
@@ -62,7 +62,6 @@ class TrainingArguments(dllm.utils.TrainingArguments):
 
 
 def train():
-    # ----- Argument parsing -------------------------------------------------------
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments)
     )
@@ -72,28 +71,49 @@ def train():
 
     # ----- Model ------------------------------------------------------------------
     model = dllm.utils.get_model(model_args=model_args)
+
+    # ----- LoRA Uygulama ----------------------------------------------------------
+    if getattr(model_args, "use_lora", False):
+        lora_config = LoraConfig(
+                        r=128,
+                        lora_alpha=128,
+                        target_modules = [
+                            "attn.Wqkv",
+                            "attn.Wo",
+                            "mlp.Wi",
+                            "mlp.Wo",
+                        ],
+                        lora_dropout=0.1,
+                        bias="none",
+                    )
+        model = get_peft_model(model, lora_config)
+        dllm.utils.print_main("LoRA adapters applied.")
+        model.print_trainable_parameters()
+
     # ----- Tokenizer --------------------------------------------------------------
     tokenizer = dllm.utils.get_tokenizer(model_args=model_args)
 
     # ----- Dataset ----------------------------------------------------------------
     with accelerate.PartialState().local_main_process_first():
         dataset = dllm.data.load_pt_dataset(
-            data_args.dataset_args, 
+            data_args.dataset_args,
             streaming=data_args.streaming,
         )
         dataset = dataset.map(
             functools.partial(
-                dllm.utils.tokenize_and_group, 
-                tokenizer=tokenizer, 
-                text_field=data_args.text_field, 
-                seq_length=data_args.max_length, 
+                dllm.utils.tokenize_and_group,
+                tokenizer=tokenizer,
+                text_field=data_args.text_field,
+                seq_length=data_args.max_length,
                 insert_eos=data_args.insert_eos,
-                drop_tail=data_args.drop_tail),
+                drop_tail=data_args.drop_tail,
+            ),
             batched=True,
             num_proc=None if data_args.streaming else data_args.num_proc,
             remove_columns=dataset["train"].column_names,
         )
-        if data_args.streaming: dataset = dataset.shuffle(seed=training_args.seed)
+        if data_args.streaming:
+            dataset = dataset.shuffle(seed=training_args.seed)
 
     # ----- Training --------------------------------------------------------------
     accelerate.PartialState().wait_for_everyone()
@@ -111,10 +131,12 @@ def train():
         ),
     )
     trainer.train()
-    trainer.save_model(os.path.join(training_args.output_dir, "checkpoint-final"))
-    trainer.processing_class.save_pretrained(
-        os.path.join(training_args.output_dir, "checkpoint-final")
-    )
+
+    # ----- Save ------------------------------------------------------------------
+    final_dir = os.path.join(training_args.output_dir, "checkpoint-final")
+    trainer.save_model(final_dir)
+    tokenizer.save_pretrained(final_dir)
+    dllm.utils.print_main(f"Final model saved to {final_dir}")
 
 
 if __name__ == "__main__":
