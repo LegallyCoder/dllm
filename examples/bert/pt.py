@@ -30,18 +30,19 @@ from dataclasses import dataclass, field
 import transformers
 import accelerate
 from peft import LoraConfig, get_peft_model
-
+from dllm.utils.configs import ModelArguments, DataArguments, TrainingArguments
+from dllm.utils import  get_tokenizer, print_args_main, initial_training_setup, get_model, tokenize_and_group
 import dllm
 
 
 @dataclass
-class ModelArguments(dllm.utils.ModelArguments):
+class ModelArguments(ModelArguments):
     model_name_or_path: str = "jhu-clsp/mmBERT-base"
     use_lora: bool = field(default=True, metadata={"help": "Apply LoRA adapters"})
 
 
 @dataclass
-class DataArguments(dllm.utils.DataArguments):
+class DataArguments(DataArguments):
     dataset_args: str = "Q-bert/wiki-tr-filtered"
     text_field: str = "text"
     max_length: int = 8192
@@ -51,7 +52,7 @@ class DataArguments(dllm.utils.DataArguments):
 
 
 @dataclass
-class TrainingArguments(dllm.utils.TrainingArguments):
+class TrainingArguments(TrainingArguments):
     output_dir: str = "models/mmbert-turkish-wiki"
     num_train_epochs: int = 2
     learning_rate: float = 5e-5
@@ -66,11 +67,11 @@ def train():
         (ModelArguments, DataArguments, TrainingArguments)
     )
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    dllm.utils.print_args_main(model_args, data_args, training_args)
-    dllm.utils.initial_training_setup(model_args, data_args, training_args)
+    print_args_main(model_args, data_args, training_args)
+    initial_training_setup(model_args, data_args, training_args)
 
     # ----- Model ------------------------------------------------------------------
-    model = dllm.utils.get_model(model_args=model_args)
+    model = get_model(model_args=model_args)
 
     # ----- LoRA Uygulama ----------------------------------------------------------
     if getattr(model_args, "use_lora", False):
@@ -91,7 +92,7 @@ def train():
         model.print_trainable_parameters()
 
     # ----- Tokenizer --------------------------------------------------------------
-    tokenizer = dllm.utils.get_tokenizer(model_args=model_args)
+    tokenizer = get_tokenizer(model_args=model_args)
 
     # ----- Dataset ----------------------------------------------------------------
     with accelerate.PartialState().local_main_process_first():
@@ -101,7 +102,7 @@ def train():
         )
         dataset = dataset.map(
             functools.partial(
-                dllm.utils.tokenize_and_group,
+                tokenize_and_group,
                 tokenizer=tokenizer,
                 text_field=data_args.text_field,
                 seq_length=data_args.max_length,
@@ -117,7 +118,7 @@ def train():
 
     # ----- Training --------------------------------------------------------------
     accelerate.PartialState().wait_for_everyone()
-    dllm.utils.print_main("start training...")
+    print("start training...")
     trainer = dllm.core.trainers.MDLMTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -136,8 +137,9 @@ def train():
     final_dir = os.path.join(training_args.output_dir, "checkpoint-final")
     trainer.save_model(final_dir)
     tokenizer.save_pretrained(final_dir)
-    dllm.utils.print_main(f"Final model saved to {final_dir}")
+    print(f"Final model saved to {final_dir}")
 
 
 if __name__ == "__main__":
     train()
+
